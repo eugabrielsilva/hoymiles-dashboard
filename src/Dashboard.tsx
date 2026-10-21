@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Area,
   Bar,
@@ -20,6 +20,7 @@ import {
   Monitor,
   Moon,
   PiggyBank,
+  RefreshCw,
   Settings2,
   Sun,
   XCircle,
@@ -69,6 +70,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { ThemePreference } from "@/lib/theme";
 
 const num = (v: number, d = 1) =>
@@ -233,6 +235,8 @@ export default function Dashboard({
   const [tariff, setTariff] = useState(0.95);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tick, setTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [pull, setPull] = useState(0);
 
   const plant = plants.find((p) => p.id === sid);
 
@@ -270,29 +274,37 @@ export default function Dashboard({
     const [y, m] = clock.date.split("-").map(Number);
     const cur = clock.date.slice(0, 7);
     const prev = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
-    getRealData(sid)
-      .then((r) => alive && setReal(r))
-      .catch((e) => alive && setError(e.message));
-    getPowerOfDay(sid, clock.date)
-      .then((c) => alive && setPower(c))
-      .catch(() => {});
+    const jobs: Promise<unknown>[] = [];
+    jobs.push(
+      getRealData(sid)
+        .then((r) => alive && (setReal(r), setError("")))
+        .catch((e) => alive && setError(e.message)),
+      getPowerOfDay(sid, clock.date)
+        .then((c) => alive && setPower(c))
+        .catch(() => {}),
+    );
     setModuleError("");
-    getModuleDayData(sid, clock.date)
-      .then((data) => alive && setModuleDay(data))
-      .catch((e) => alive && setModuleError(e.message));
-    getMicroinverters(sid)
-      .then((items) => alive && setMicroinverters(items))
-      .catch(() => {});
-    Promise.all([
-      getEnergyOfMonth(sid, prev + "-01"),
-      getEnergyOfMonth(sid, cur + "-01"),
-    ])
-      .then(
-        ([a, b]) =>
-          alive &&
-          setHistory([...daysFromChart(a, prev), ...daysFromChart(b, cur)]),
-      )
-      .catch(() => {});
+    jobs.push(
+      getModuleDayData(sid, clock.date)
+        .then((data) => alive && setModuleDay(data))
+        .catch((e) => alive && setModuleError(e.message)),
+      getMicroinverters(sid)
+        .then((items) => alive && setMicroinverters(items))
+        .catch(() => {}),
+    );
+    jobs.push(
+      Promise.all([
+        getEnergyOfMonth(sid, prev + "-01"),
+        getEnergyOfMonth(sid, cur + "-01"),
+      ])
+        .then(
+          ([a, b]) =>
+            alive &&
+            setHistory([...daysFromChart(a, prev), ...daysFromChart(b, cur)]),
+        )
+        .catch(() => {}),
+    );
+    Promise.all(jobs).then(() => alive && setRefreshing(false));
     return () => {
       alive = false;
     };
@@ -415,6 +427,40 @@ export default function Dashboard({
     setTariff(v);
     if (sid) localStorage.setItem(`tariff_${sid}`, String(v));
   };
+  const refresh = useCallback(() => {
+    setRefreshing(true);
+    setTick((n) => n + 1);
+  }, []);
+
+  useEffect(() => {
+    const THRESHOLD = 80;
+    let startY: number | null = null;
+    let dist = 0;
+    const onStart = (e: TouchEvent) => {
+      startY = window.scrollY <= 0 ? e.touches[0].clientY : null;
+      dist = 0;
+    };
+    const onMove = (e: TouchEvent) => {
+      if (startY === null) return;
+      dist = Math.max(0, (e.touches[0].clientY - startY) * 0.5);
+      setPull(Math.min(dist, THRESHOLD * 1.5));
+    };
+    const onEnd = () => {
+      if (startY !== null && dist >= THRESHOLD) refresh();
+      startY = null;
+      dist = 0;
+      setPull(0);
+    };
+    window.addEventListener("touchstart", onStart, { passive: true });
+    window.addEventListener("touchmove", onMove, { passive: true });
+    window.addEventListener("touchend", onEnd);
+    return () => {
+      window.removeEventListener("touchstart", onStart);
+      window.removeEventListener("touchmove", onMove);
+      window.removeEventListener("touchend", onEnd);
+    };
+  }, [refresh]);
+
   const logout = () => {
     clearToken();
     onLogout();
@@ -435,14 +481,25 @@ export default function Dashboard({
   const capacityPercent = capacityKwp > 0 ? (kw / capacityKwp) * 100 : null;
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-4 p-4 pb-10">
+    <div
+      className="relative mx-auto flex max-w-5xl flex-col gap-4 p-4 pb-10"
+      style={{
+        transform: pull ? `translateY(${pull}px)` : undefined,
+        transition: pull ? undefined : "transform 0.2s",
+      }}
+    >
+      {(pull > 0 || refreshing) && (
+        <div className="pointer-events-none absolute inset-x-0 -top-8 flex justify-center text-muted-foreground">
+          <RefreshCw
+            className={`size-5 ${refreshing ? "animate-spin" : ""}`}
+            style={
+              refreshing ? undefined : { transform: `rotate(${pull * 3}deg)` }
+            }
+          />
+        </div>
+      )}
       <header className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-3">
-          <div
-            className={`grid size-10 place-items-center rounded-full bg-[${PURPLE}] text-white`}
-          >
-            <Sun className="size-5" />
-          </div>
           <div>
             <h1 className="text-lg font-semibold leading-tight">
               {plant?.name ?? "Minha Usina Solar"}
@@ -466,6 +523,16 @@ export default function Dashboard({
               ))}
             </select>
           )}
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Atualizar dados"
+            title="Atualizar dados"
+            disabled={refreshing}
+            onClick={refresh}
+          >
+            <RefreshCw className={refreshing ? "animate-spin" : ""} />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -528,7 +595,46 @@ export default function Dashboard({
 
       {error && <p className="text-sm text-red-400">{error}</p>}
 
-      {real && view && (
+      {(refreshing || (!(real && view) && !error)) && (
+        <>
+          <Card>
+            <CardHeader>
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-12 w-56" />
+              <Skeleton className="h-4 w-64 max-w-full" />
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-3 w-full" />
+              <Skeleton className="h-4 w-3/4" />
+            </CardContent>
+          </Card>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[0, 1, 2].map((i) => (
+              <Card key={i}>
+                <CardHeader>
+                  <Skeleton className="h-4 w-28" />
+                  <Skeleton className="h-8 w-32" />
+                  <Skeleton className="h-4 w-40 max-w-full" />
+                </CardHeader>
+              </Card>
+            ))}
+          </div>
+          {[260, 220, 280].map((h) => (
+            <Card key={h}>
+              <CardHeader>
+                <Skeleton className="h-5 w-48" />
+                <Skeleton className="h-4 w-72 max-w-full" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton style={{ height: h }} className="w-full" />
+              </CardContent>
+            </Card>
+          ))}
+        </>
+      )}
+
+      {real && view && !refreshing && (
         <>
           <Card className={`border ${level.box}`}>
             <CardHeader>
@@ -730,6 +836,16 @@ export default function Dashboard({
                 <p className="text-sm text-muted-foreground">
                   Não foi possível carregar os dados dos módulos: {moduleError}
                 </p>
+              ) : !moduleDay ? (
+                <>
+                  <Skeleton className="h-16 w-full" />
+                  <Skeleton className="h-70 w-full" />
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                    {[0, 1, 2, 3].map((i) => (
+                      <Skeleton key={i} className="h-24" />
+                    ))}
+                  </div>
+                </>
               ) : moduleCards.length ? (
                 <>
                   {moduleWarnings.length ? (

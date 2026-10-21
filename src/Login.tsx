@@ -35,7 +35,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
     <div className="grid min-h-screen place-items-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <div className="mb-2 grid size-10 place-items-center rounded-full bg-[#863bff]/15 text-[#863bff]">
+          <div className="mb-2 grid size-10 place-items-center rounded-full bg-[#863bff] text-white">
             <Sun className="size-5" />
           </div>
           <CardTitle className="text-xl">Minha Usina Solar</CardTitle>
