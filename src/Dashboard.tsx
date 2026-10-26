@@ -15,12 +15,15 @@ import {
 import {
   AlertTriangle,
   CheckCircle2,
+  CloudSun,
   Info,
   LogOut,
+  MapPin,
   Monitor,
   Moon,
   PiggyBank,
   RefreshCw,
+  Search,
   Settings2,
   Sun,
   XCircle,
@@ -72,6 +75,14 @@ import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { ThemePreference } from "@/lib/theme";
+import {
+  getWeatherForecast,
+  searchLocations,
+  weatherDescription,
+  weatherFactor,
+  type StationLocation,
+  type WeatherDay,
+} from "./api/weather";
 
 const num = (v: number, d = 1) =>
   v.toLocaleString("pt-BR", { maximumFractionDigits: d });
@@ -233,6 +244,14 @@ export default function Dashboard({
   const [history, setHistory] = useState<DayEnergy[]>([]);
   const [error, setError] = useState("");
   const [tariff, setTariff] = useState(0.95);
+  const [location, setLocation] = useState<StationLocation | null>(null);
+  const [forecast, setForecast] = useState<WeatherDay[]>([]);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState("");
+  const [locationQuery, setLocationQuery] = useState("");
+  const [locationResults, setLocationResults] = useState<StationLocation[]>([]);
+  const [locationSearchLoading, setLocationSearchLoading] = useState(false);
+  const [locationSearchError, setLocationSearchError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -266,6 +285,39 @@ export default function Dashboard({
         .then((p) => p.in > 0 && setTariff(p.in))
         .catch(() => {});
   }, [sid, plant]);
+
+  useEffect(() => {
+    if (!sid) return;
+    const stored = localStorage.getItem(`station_location_${sid}`);
+    try {
+      const savedLocation = stored ? (JSON.parse(stored) as StationLocation) : null;
+      setLocation(savedLocation);
+      setLocationQuery(savedLocation?.name ?? "");
+    } catch {
+      setLocation(null);
+      setLocationQuery("");
+    }
+  }, [sid]);
+
+  useEffect(() => {
+    if (!location) {
+      setForecast([]);
+      setWeatherError("");
+      return;
+    }
+    let alive = true;
+    setWeatherLoading(true);
+    setWeatherError("");
+    getWeatherForecast(location)
+      .then((days) => alive && setForecast(days))
+      .catch((e: unknown) => {
+        if (alive) setWeatherError(e instanceof Error ? e.message : "Erro ao carregar a previsão.");
+      })
+      .finally(() => alive && setWeatherLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [location]);
 
   useEffect(() => {
     if (!sid || !plant) return;
@@ -313,6 +365,7 @@ export default function Dashboard({
   const view = useMemo(() => {
     if (!real || !plant) return null;
     const clock = plantClock(plant.tz_name, real.data_time);
+    const dayForecast = forecast.find((day) => day.date === clock.date);
     const a = analyze({
       todayKwh: Number(real.today_eq) / 1000,
       powerW: Number(real.real_power),
@@ -322,9 +375,19 @@ export default function Dashboard({
       today: clock.date,
       hour: clock.hour,
       ageMin: clock.ageMin,
+      weatherFactor: dayForecast ? weatherFactor(dayForecast.cloudCover) : 1,
+      forecastFactors: Object.fromEntries(
+        forecast.map((day) => [day.date, weatherFactor(day.cloudCover)]),
+      ),
     });
     return { a, clock };
-  }, [real, plant, history]);
+  }, [real, plant, history, forecast]);
+
+  const todayForecast = forecast.find((day) => day.date === view?.clock.date);
+  const typicalDayKwh =
+    view && todayForecast
+      ? view.a.expectedDay / weatherFactor(todayForecast.cloudCover)
+      : view?.a.expectedDay ?? 0;
 
   const curve = useMemo(() => {
     const s = power?.series[0];
@@ -426,6 +489,24 @@ export default function Dashboard({
   const changeTariff = (v: number) => {
     setTariff(v);
     if (sid) localStorage.setItem(`tariff_${sid}`, String(v));
+  };
+  const findLocation = async () => {
+    if (!locationQuery.trim()) return;
+    setLocationSearchLoading(true);
+    setLocationSearchError("");
+    try {
+      setLocationResults(await searchLocations(locationQuery.trim()));
+    } catch (e) {
+      setLocationSearchError(e instanceof Error ? e.message : "Erro ao buscar localização.");
+    } finally {
+      setLocationSearchLoading(false);
+    }
+  };
+  const chooseLocation = (next: StationLocation) => {
+    setLocation(next);
+    setLocationResults([]);
+    setLocationQuery(next.name);
+    if (sid) localStorage.setItem(`station_location_${sid}`, JSON.stringify(next));
   };
   const refresh = useCallback(() => {
     setRefreshing(true);
@@ -563,10 +644,55 @@ export default function Dashboard({
               <DialogHeader>
                 <DialogTitle>Configurações da usina</DialogTitle>
                 <DialogDescription>
-                  Ajuste a tarifa usada para estimar sua economia na conta de
-                  luz.
+                  Configure a tarifa e a localização usada nas estimativas de
+                  geração com previsão do tempo.
                 </DialogDescription>
               </DialogHeader>
+              <div className="flex flex-col gap-2">
+                <label htmlFor="station-location" className="text-sm font-medium">
+                  Localização da estação
+                </label>
+                <div className="flex gap-2">
+                  <Input
+                    id="station-location"
+                    value={locationQuery}
+                    placeholder="Cidade ou endereço próximo"
+                    onChange={(e) => setLocationQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), void findLocation())}
+                  />
+                  <Button
+                    type="button"
+                    size="icon"
+                    aria-label="Buscar localização"
+                    title="Buscar localização"
+                    disabled={locationSearchLoading || !locationQuery.trim()}
+                    onClick={() => void findLocation()}
+                  >
+                    <Search />
+                  </Button>
+                </div>
+                {location && (
+                  <p className="flex items-center gap-1 text-sm text-muted-foreground">
+                    <MapPin className="size-4" /> {location.name}
+                  </p>
+                )}
+                {locationSearchLoading && <p className="text-sm text-muted-foreground">Buscando cidades...</p>}
+                {locationSearchError && <p className="text-sm text-red-400">{locationSearchError}</p>}
+                {locationResults.map((result) => (
+                  <Button
+                    key={`${result.latitude}-${result.longitude}`}
+                    type="button"
+                    variant="outline"
+                    className="h-auto justify-start whitespace-normal py-2 text-left"
+                    onClick={() => chooseLocation(result)}
+                  >
+                    {result.name}
+                  </Button>
+                ))}
+                <p className="text-sm text-muted-foreground">
+                  A localização é salva por usina e usada para consultar a previsão local.
+                </p>
+              </div>
               <label
                 htmlFor="energy-tariff"
                 className="flex flex-col gap-2 text-sm font-medium"
@@ -736,6 +862,59 @@ export default function Dashboard({
               </CardHeader>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <CloudSun className="size-5" /> Previsão e produção estimada
+              </CardTitle>
+              <CardDescription>
+                {location
+                  ? `Condições em ${location.name}. Estimativa baseada no histórico da usina e na nebulosidade prevista.`
+                  : "Defina a localização da estação nas configurações para incluir o clima na estimativa."}
+                {" "}
+                Dados meteorológicos: {" "}
+                <a
+                  href="https://open-meteo.com/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline underline-offset-4"
+                >
+                  Open-Meteo
+                </a>.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {weatherLoading && <p className="text-sm text-muted-foreground">Carregando previsão...</p>}
+              {weatherError && <p className="text-sm text-red-400">{weatherError}</p>}
+              {forecast.length > 0 && (
+                <div className="divide-y">
+                  {forecast.map((day) => {
+                    const estimate = typicalDayKwh * weatherFactor(day.cloudCover);
+                    return (
+                      <div
+                        key={day.date}
+                        className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-1 py-3 text-sm sm:grid-cols-[1fr_1.2fr_auto]"
+                      >
+                        <strong>
+                          {new Date(`${day.date}T12:00:00`).toLocaleDateString("pt-BR", {
+                            weekday: "short",
+                            day: "2-digit",
+                            month: "2-digit",
+                          })}
+                        </strong>
+                        <span className="text-muted-foreground">
+                          {weatherDescription(day.code)} · {Math.round(day.cloudCover)}% nuvens
+                          {day.precipitationChance > 0 && ` · ${day.precipitationChance}% chuva`}
+                        </span>
+                        <span className="text-right font-medium">~{num(estimate, 1)} kWh</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>

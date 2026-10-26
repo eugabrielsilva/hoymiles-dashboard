@@ -86,6 +86,8 @@ interface Input {
   today: string
   hour: number
   ageMin: number
+  weatherFactor?: number
+  forecastFactors?: Record<string, number>
 }
 
 const fmt = (v: number) => v.toLocaleString('pt-BR', { maximumFractionDigits: 1 })
@@ -93,7 +95,8 @@ const fmt = (v: number) => v.toLocaleString('pt-BR', { maximumFractionDigits: 1 
 export function analyze(i: Input): Analysis {
   const past = i.history.filter((d) => d.date < i.today && d.kwh > 0)
   const usedHistory = past.length >= 3
-  const expectedDay = usedHistory ? median(past.slice(-30).map((d) => d.kwh)) : i.capacityKwp * 4.5
+  const baselineDay = usedHistory ? median(past.slice(-30).map((d) => d.kwh)) : i.capacityKwp * 4.5
+  const expectedDay = baselineDay * (i.weatherFactor ?? 1)
   const expectedNow = expectedDay * cumulativeShare(i.hour)
   const daytime = i.hour >= SUNRISE + 1 && i.hour <= SUNSET - 1
   const ratio = expectedNow >= 1 ? i.todayKwh / expectedNow : null
@@ -170,7 +173,11 @@ export function analyze(i: Input): Analysis {
   const [y, m] = i.today.split('-').map(Number)
   const dim = new Date(y, m, 0).getDate()
   const dayNum = Number(i.today.slice(8))
-  const projectedMonth = i.monthKwh + expectedDay * Math.max(dim - dayNum, 0)
+  let projectedMonth = i.monthKwh
+  for (let day = dayNum + 1; day <= dim; day += 1) {
+    const date = `${i.today.slice(0, 7)}-${String(day).padStart(2, '0')}`
+    projectedMonth += baselineDay * (i.forecastFactors?.[date] ?? 1)
+  }
 
   return { expectedDay, expectedNow, ratio, level, headline, projectedMonth, insights, usedHistory }
 }
